@@ -34,10 +34,11 @@ class SelfAttention(nn.Module):
         attention_score: torch.Tensor = (query @ key.transpose(-2, -1)) / math.sqrt(key.size(-1))
 
         causal_mask = torch.tril(torch.ones((sequence_length, sequence_length), dtype=torch.bool, device=x.device)).view(1, 1, sequence_length, sequence_length)
-        attention_score = attention_score.masked_fill(~causal_mask, float('-inf'))
+        mask_value = torch.finfo(attention_score.dtype).min
+        attention_score = attention_score.masked_fill(~causal_mask, mask_value)
 
         if attention_mask is not None:
-            attention_score = attention_score.masked_fill(attention_mask.view(batch_size, 1, 1, sequence_length) == 0, float('-inf'))
+            attention_score = attention_score.masked_fill(attention_mask.view(batch_size, 1, 1, sequence_length) == 0, mask_value)
 
         attention_score = nn.functional.softmax(attention_score, dim=-1)
 
@@ -150,12 +151,13 @@ def gpt2_complete(
     attention_mask: torch.Tensor = tokens["attention_mask"]
 
     batch_size = input_ids.size(0)
-    unfinished = torch.ones(batch_size, dtype=torch.bool, device=device)
+    lengths = attention_mask.sum(dim=1)
+    unfinished = lengths < max_seq_length
     all_logits = []
     generated_tokens = [[] for _ in range(batch_size)]
 
-    while unfinished.any() and input_ids.size(1) < max_seq_length:
-        print(f"\rGenerating token {input_ids.size(1)} / {max_seq_length}...", end="", flush=True)
+    while unfinished.any():
+        print(f"\rGenerating step {len(all_logits) + 1}...", end="", flush=True)
 
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
@@ -169,7 +171,8 @@ def gpt2_complete(
 
         next_tokens: torch.Tensor = torch.argmax(next_token_logits, dim=1)
         next_tokens = next_tokens.masked_fill(~unfinished, tokenizer.pad_token_id)
-        just_finished = unfinished & (next_tokens == tokenizer.eos_token_id)
+        lengths = lengths + unfinished.long()
+        just_finished = unfinished & ((next_tokens == tokenizer.eos_token_id) | (lengths >= max_seq_length))
 
         for i in range(batch_size):
             if (unfinished[i]):
