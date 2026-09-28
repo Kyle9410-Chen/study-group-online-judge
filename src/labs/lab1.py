@@ -34,10 +34,10 @@ class SelfAttention(nn.Module):
         attention_score: torch.Tensor = (query @ key.transpose(-2, -1)) / math.sqrt(key.size(-1))
 
         causal_mask = torch.tril(torch.ones((sequence_length, sequence_length), dtype=torch.bool, device=x.device)).view(1, 1, sequence_length, sequence_length)
-        attention_score = attention_score.masked_fill(~causal_mask, -1e4)
+        attention_score = attention_score.masked_fill(~causal_mask, float('-inf'))
 
         if attention_mask is not None:
-            attention_score = attention_score.masked_fill(attention_mask.view(batch_size, 1, 1, sequence_length) == 0, -1e4)
+            attention_score = attention_score.masked_fill(attention_mask.view(batch_size, 1, 1, sequence_length) == 0, float('-inf'))
 
         attention_score = nn.functional.softmax(attention_score, dim=-1)
 
