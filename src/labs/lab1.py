@@ -25,7 +25,7 @@ class SelfAttention(nn.Module):
         batch_size, sequence_length, dimension = x.size()
 
         qkv: torch.Tensor = self.attention(x)
-        query, key, value = map(torch.Tensor, qkv.split(self.dimension, dim=2))
+        query, key, value = qkv.split(self.dimension, dim=2)
 
         query = query.view(batch_size, sequence_length, self.n_head, dimension // self.n_head).transpose(1, 2)
         key = key.view(batch_size, sequence_length, self.n_head, dimension // self.n_head).transpose(1, 2)
@@ -112,7 +112,7 @@ def gpt2_complete(
     model = Model(config).to(device)
 
     # Load Hugging Face
-    hugging_face_model = AutoModelForCausalLM.from_pretrained("gpt2").to(device)
+    hugging_face_model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2").to(device)
     hugging_face_state_dict = hugging_face_model.state_dict()
     custom_state_dict = model.state_dict()
 
@@ -140,7 +140,7 @@ def gpt2_complete(
             with torch.no_grad():
                 custom_state_dict[custom_name].copy_(param)
 
-    tokenizer: GPT2Tokenizer = GPT2Tokenizer.from_pretrained("gpt2", padding_side="left")
+    tokenizer: GPT2Tokenizer = GPT2Tokenizer.from_pretrained("openai-community/gpt2", padding_side="left")
     tokenizer.pad_token = tokenizer.eos_token
 
     model.eval()
