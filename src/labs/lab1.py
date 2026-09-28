@@ -13,11 +13,26 @@ class Config():
         self.n_head = 12
         self.layer_norm_eps = 1e-5
 
+class Conv1D(nn.Module):
+    """Linear layer storing weight as (in, out) and using addmm, same as HF GPT-2,
+    so fp16 rounding matches the reference bit for bit."""
+
+    def __init__(self, in_features: int, out_features: int):
+        super().__init__()
+        self.out_features = out_features
+        self.weight = nn.Parameter(torch.empty(in_features, out_features))
+        self.bias = nn.Parameter(torch.zeros(out_features))
+
+    def forward(self, x: torch.Tensor):
+        size_out = x.size()[:-1] + (self.out_features,)
+        x = torch.addmm(self.bias, x.view(-1, x.size(-1)), self.weight)
+        return x.view(size_out)
+
 class SelfAttention(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
-        self.attention = nn.Linear(config.dimension, 3 * config.dimension)
-        self.projection = nn.Linear(config.dimension, config.dimension)
+        self.attention = Conv1D(config.dimension, 3 * config.dimension)
+        self.projection = Conv1D(config.dimension, config.dimension)
         self.n_head = config.n_head
         self.dimension = config.dimension
 
@@ -31,18 +46,12 @@ class SelfAttention(nn.Module):
         key = key.view(batch_size, sequence_length, self.n_head, dimension // self.n_head).transpose(1, 2)
         value = value.view(batch_size, sequence_length, self.n_head, dimension // self.n_head).transpose(1, 2)
 
-        attention_score: torch.Tensor = (query @ key.transpose(-2, -1)) / math.sqrt(key.size(-1))
-
-        causal_mask = torch.tril(torch.ones((sequence_length, sequence_length), dtype=torch.bool, device=x.device)).view(1, 1, sequence_length, sequence_length)
-        mask_value = torch.finfo(attention_score.dtype).min
-        attention_score = attention_score.masked_fill(~causal_mask, mask_value)
-
+        # Boolean mask (True = attend): causal AND not padding, the same mask HF passes to SDPA
+        mask = torch.tril(torch.ones((sequence_length, sequence_length), dtype=torch.bool, device=x.device)).view(1, 1, sequence_length, sequence_length)
         if attention_mask is not None:
-            attention_score = attention_score.masked_fill(attention_mask.view(batch_size, 1, 1, sequence_length) == 0, mask_value)
+            mask = mask & attention_mask.bool().view(batch_size, 1, 1, sequence_length)
 
-        attention_score = nn.functional.softmax(attention_score, dim=-1)
-
-        y = attention_score @ value
+        y = nn.functional.scaled_dot_product_attention(query, key, value, attn_mask=mask)
         y = y.transpose(1, 2).contiguous().view(batch_size, sequence_length, dimension)
 
         return self.projection(y)
@@ -51,10 +60,13 @@ class SelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
-        self.full_connect = nn.Linear(config.dimension, 4 * config.dimension)
-        self.full_connect_projection = nn.Linear(4 * config.dimension, config.dimension)
-        self.activation = nn.GELU(approximate="tanh")
-    
+        self.full_connect = Conv1D(config.dimension, 4 * config.dimension)
+        self.full_connect_projection = Conv1D(4 * config.dimension, config.dimension)
+
+    def activation(self, x: torch.Tensor):
+        # HF "gelu_new" written out; nn.GELU(approximate="tanh") rounds differently in fp16
+        return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
+
     def forward(self, x: torch.Tensor):
         return self.full_connect_projection(self.activation(self.full_connect(x)))
     
@@ -110,10 +122,12 @@ def gpt2_complete(
 
     device = torch.device("cpu")
     config = Config()
-    model = Model(config).to(device)
+    # CI verifies against the HF reference in fp16, so run in fp16 to match its numerics
+    dtype = torch.float16
+    model = Model(config).to(device=device, dtype=dtype)
 
     # Load Hugging Face
-    hugging_face_model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2").to(device)
+    hugging_face_model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2", dtype=dtype).to(device)
     hugging_face_state_dict = hugging_face_model.state_dict()
     custom_state_dict = model.state_dict()
 
@@ -122,9 +136,6 @@ def gpt2_complete(
         if name.endswith('.attn.masked_bias') or name.endswith('.attn.bias'):
             continue
 
-        if 'c_attn.weight' in name or 'c_proj.weight' in name or 'c_fc.weight' in name:
-            param = param.t()
-            
         custom_name = name.replace("transformer.", "")
         custom_name = custom_name.replace("wte", "token_embedding")
         custom_name = custom_name.replace("wpe", "position_embedding")
