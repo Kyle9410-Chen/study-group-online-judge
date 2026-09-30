@@ -4,7 +4,8 @@ import time
 from torch import nn
 from transformers import GPT2Tokenizer, AutoModelForCausalLM
 
-class Config():
+
+class Config:
     def __init__(self):
         self.vocabulary_size = 50257
         self.dimension = 768
@@ -12,6 +13,7 @@ class Config():
         self.n_layer = 12
         self.n_head = 12
         self.layer_norm_eps = 1e-5
+
 
 class Conv1D(nn.Module):
     """Linear layer storing weight as (in, out) and using addmm, same as HF GPT-2,
@@ -28,6 +30,7 @@ class Conv1D(nn.Module):
         x = torch.addmm(self.bias, x.view(-1, x.size(-1)), self.weight)
         return x.view(size_out)
 
+
 class SelfAttention(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
@@ -42,16 +45,28 @@ class SelfAttention(nn.Module):
         qkv: torch.Tensor = self.attention(x)
         query, key, value = qkv.split(self.dimension, dim=2)
 
-        query = query.view(batch_size, sequence_length, self.n_head, dimension // self.n_head).transpose(1, 2)
-        key = key.view(batch_size, sequence_length, self.n_head, dimension // self.n_head).transpose(1, 2)
-        value = value.view(batch_size, sequence_length, self.n_head, dimension // self.n_head).transpose(1, 2)
+        query = query.view(
+            batch_size, sequence_length, self.n_head, dimension // self.n_head
+        ).transpose(1, 2)
+        key = key.view(
+            batch_size, sequence_length, self.n_head, dimension // self.n_head
+        ).transpose(1, 2)
+        value = value.view(
+            batch_size, sequence_length, self.n_head, dimension // self.n_head
+        ).transpose(1, 2)
 
         # Boolean mask (True = attend): causal AND not padding, the same mask HF passes to SDPA
-        mask = torch.tril(torch.ones((sequence_length, sequence_length), dtype=torch.bool, device=x.device)).view(1, 1, sequence_length, sequence_length)
+        mask = torch.tril(
+            torch.ones(
+                (sequence_length, sequence_length), dtype=torch.bool, device=x.device
+            )
+        ).view(1, 1, sequence_length, sequence_length)
         if attention_mask is not None:
             mask = mask & attention_mask.bool().view(batch_size, 1, 1, sequence_length)
 
-        y = nn.functional.scaled_dot_product_attention(query, key, value, attn_mask=mask)
+        y = nn.functional.scaled_dot_product_attention(
+            query, key, value, attn_mask=mask
+        )
         y = y.transpose(1, 2).contiguous().view(batch_size, sequence_length, dimension)
 
         return self.projection(y)
@@ -65,11 +80,21 @@ class MLP(nn.Module):
 
     def activation(self, x: torch.Tensor):
         # HF "gelu_new" written out; nn.GELU(approximate="tanh") rounds differently in fp16
-        return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
+        return (
+            0.5
+            * x
+            * (
+                1.0
+                + torch.tanh(
+                    math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))
+                )
+            )
+        )
 
     def forward(self, x: torch.Tensor):
         return self.full_connect_projection(self.activation(self.full_connect(x)))
-    
+
+
 class TransformerBlock(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
@@ -77,21 +102,29 @@ class TransformerBlock(nn.Module):
         self.attention = SelfAttention(config)
         self.layer_norm2 = nn.LayerNorm(config.dimension, eps=config.layer_norm_eps)
         self.mlp = MLP(config)
-    
+
     def forward(self, x, attention_mask: torch.Tensor = None):
         x = x + self.attention(self.layer_norm1(x), attention_mask=attention_mask)
         return x + self.mlp(self.layer_norm2(x))
+
 
 class Model(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
         self.token_embedding = nn.Embedding(config.vocabulary_size, config.dimension)
         self.position_embedding = nn.Embedding(config.n_position, config.dimension)
-        self.layers = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layer)])
+        self.layers = nn.ModuleList(
+            [TransformerBlock(config) for _ in range(config.n_layer)]
+        )
         self.layer_norm = nn.LayerNorm(config.dimension, eps=config.layer_norm_eps)
         self.lm_head = nn.Linear(config.dimension, config.vocabulary_size, bias=False)
 
-    def forward(self, input_ids: torch.Tensor, position_ids: torch.Tensor = None, attention_mask: torch.Tensor = None):
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor = None,
+        attention_mask: torch.Tensor = None,
+    ):
         if position_ids is None:
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
@@ -100,9 +133,10 @@ class Model(nn.Module):
 
         for block in self.layers:
             x = block(x, attention_mask=attention_mask)
-        
+
         x = self.layer_norm(x)
         return self.lm_head(x)
+
 
 def gpt2_complete(
     input: list[str],
@@ -127,13 +161,17 @@ def gpt2_complete(
     model = Model(config).to(device=device, dtype=dtype)
 
     # Load Hugging Face
-    hugging_face_model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2", dtype=dtype).to(device)
+    hugging_face_model = AutoModelForCausalLM.from_pretrained(
+        "openai-community/gpt2", dtype=dtype
+    ).to(device)
     hugging_face_state_dict = hugging_face_model.state_dict()
     custom_state_dict = model.state_dict()
 
-    custom_state_dict['lm_head.weight'].copy_(hugging_face_state_dict['transformer.wte.weight'])
+    custom_state_dict["lm_head.weight"].copy_(
+        hugging_face_state_dict["transformer.wte.weight"]
+    )
     for name, param in hugging_face_state_dict.items():
-        if name.endswith('.attn.masked_bias') or name.endswith('.attn.bias'):
+        if name.endswith(".attn.masked_bias") or name.endswith(".attn.bias"):
             continue
 
         custom_name = name.replace("transformer.", "")
@@ -152,12 +190,16 @@ def gpt2_complete(
             with torch.no_grad():
                 custom_state_dict[custom_name].copy_(param)
 
-    tokenizer: GPT2Tokenizer = GPT2Tokenizer.from_pretrained("openai-community/gpt2", padding_side="left")
+    tokenizer: GPT2Tokenizer = GPT2Tokenizer.from_pretrained(
+        "openai-community/gpt2", padding_side="left"
+    )
     tokenizer.pad_token = tokenizer.eos_token
 
     model.eval()
 
-    tokens: torch.Tensor = tokenizer(input, return_tensors="pt", padding=True).to(device)
+    tokens: torch.Tensor = tokenizer(input, return_tensors="pt", padding=True).to(
+        device
+    )
     input_ids: torch.Tensor = tokens["input_ids"]
     attention_mask: torch.Tensor = tokens["attention_mask"]
 
@@ -174,37 +216,47 @@ def gpt2_complete(
         position_ids.masked_fill_(attention_mask == 0, 1)
 
         with torch.no_grad():
-            logits: torch.Tensor = model(input_ids, attention_mask=attention_mask, position_ids=position_ids)
-            
+            logits: torch.Tensor = model(
+                input_ids, attention_mask=attention_mask, position_ids=position_ids
+            )
+
         next_token_logits = logits[:, -1, :]
-        next_token_logits = next_token_logits.masked_fill(~unfinished.unsqueeze(-1), 0.0)
+        next_token_logits = next_token_logits.masked_fill(
+            ~unfinished.unsqueeze(-1), 0.0
+        )
         all_logits.append(next_token_logits)
 
         next_tokens: torch.Tensor = torch.argmax(next_token_logits, dim=1)
         next_tokens = next_tokens.masked_fill(~unfinished, tokenizer.pad_token_id)
         lengths = lengths + unfinished.long()
-        just_finished = unfinished & ((next_tokens == tokenizer.eos_token_id) | (lengths >= max_seq_length))
+        just_finished = unfinished & (
+            (next_tokens == tokenizer.eos_token_id) | (lengths >= max_seq_length)
+        )
 
         for i in range(batch_size):
-            if (unfinished[i]):
+            if unfinished[i]:
                 generated_tokens[i].append(next_tokens[i].item())
-        
+
         unfinished = unfinished & ~just_finished
 
         input_ids = torch.cat([input_ids, next_tokens.unsqueeze(1)], dim=1)
 
         unfinished_old = unfinished | just_finished
-        attention_mask = torch.cat([attention_mask, unfinished_old.long().unsqueeze(1)], dim=1)
+        attention_mask = torch.cat(
+            [attention_mask, unfinished_old.long().unsqueeze(1)], dim=1
+        )
 
     if all_logits:
         logits_tensor = torch.stack(all_logits, dim=1)
     else:
-        logits_tensor = torch.empty((batch_size, 0, config.vocabulary_size), device=device)
+        logits_tensor = torch.empty(
+            (batch_size, 0, config.vocabulary_size), device=device
+        )
 
     completions = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
 
     return completions, logits_tensor
-    
+
 
 if __name__ == "__main__":
     completions, logits_tensor = gpt2_complete(["Test", "Hello World"])
