@@ -220,3 +220,6 @@ __marimo__/
 # Judge runtime state
 /data/
 /work/
+
+# md
+LAB1.md
